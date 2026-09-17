@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Human Rig Lab · ZSphere</title>
+    <link rel="stylesheet" href="/demo/style.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/node_modules/three/build/three.module.js",
+          "three/addons/": "/node_modules/three/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <span class="brand-mark" aria-hidden="true">HR</span>
+          <div>
+            <strong>HUMAN RIG LAB</strong>
+            <span>ZSphere foundation</span>
+          </div>
+        </div>
+        <div class="runtime-state" id="runtime-state" data-state="ready">
+          <span class="state-dot"></span>
+          <span id="runtime-label">Z 球地基 · 从零创建</span>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="panel controls-panel" aria-label="Z球工具">
+          <div class="panel-heading">
+            <span class="eyebrow">ZSPHERE</span>
+            <h1>Z 球地基</h1>
+            <p id="tool-description">根 Joint 用独立按钮。Q：先点选再拖动延伸；Link 点选后连按两次 Q 升级。</p>
+          </div>
+
+          <section class="control-section pose-settings">
+            <div class="section-title">
+              <h2>工具模式</h2>
+              <span id="tool-status">Q · 创建</span>
+            </div>
+            <div class="pose-action-row">
+              <button type="button" id="create-root" class="wide-action">放置根关节球</button>
+            </div>
+            <div class="compare-mode-grid" id="tool-modes" role="group" aria-label="Z球工具">
+              <button type="button" data-tool="draw" class="is-active" aria-pressed="true">Q 延伸</button>
+              <button type="button" data-tool="move" aria-pressed="false">W 移动</button>
+              <button type="button" data-tool="scale" aria-pressed="false">E 缩放</button>
+              <button type="button" data-tool="rotate" aria-pressed="false">R 旋转</button>
+            </div>
+            <label class="setting-toggle">
+              <span><strong>对称</strong><small>X 镜像 · 增删改生效</small></span>
+              <input id="symmetry-toggle" type="checkbox" checked />
+              <span class="toggle-track" aria-hidden="true"></span>
+            </label>
+            <label class="setting-toggle">
+              <span><strong>创建中心球</strong><small>开：在中心球上只生一个轴上子球</small></span>
+              <input id="center-create-toggle" type="checkbox" />
+              <span class="toggle-track" aria-hidden="true"></span>
+            </label>
+            <label class="setting-toggle">
+              <span><strong>穿透</strong><small>半透明预览 · X（仍保留深度遮挡）</small></span>
+              <input id="xray-toggle" type="checkbox" />
+              <span class="toggle-track" aria-hidden="true"></span>
+            </label>
+            <p class="group-note" id="tool-hint">
+              根 Joint 用独立按钮。Q：先点选关节球，再在其上拖动延伸。点选 Link 后短时间连按两次 Q 升级。
+            </p>
+            <div class="pose-action-row">
+              <button type="button" id="clear-graph">清空</button>
+              <button type="button" id="delete-selected">删除所选</button>
+            </div>
+            <div class="selected-bone-readout">
+              <span>Selected</span>
+              <strong id="selected-readout">—</strong>
+              <small id="orbit-readout">R：选子球 → 再点父球绑定 → Gizmo 旋转</small>
+            </div>
+          </section>
+
+        </aside>
+
+        <main class="viewport" id="viewport">
+          <canvas id="scene-canvas" aria-label="ZSphere 视口"></canvas>
+          <div class="viewport-tools" aria-label="视角工具">
+            <button type="button" id="view-front">正面</button>
+            <button type="button" id="view-side">侧面</button>
+            <button type="button" id="view-reset">复位</button>
+          </div>
+          <div class="interaction-hint" id="interaction-hint">
+            <kbd>Q</kbd> 延伸 · <kbd>W</kbd> 移动 · <kbd>E</kbd> 缩放 · <kbd>R</kbd> 旋转 · <kbd>X</kbd> 穿透 · <kbd>Del</kbd> 删除
+          </div>
+        </main>
+
+        <aside class="panel inspector-panel" aria-label="状态">
+          <div class="panel-heading compact">
+            <span class="eyebrow">STATUS</span>
+            <h2>图状态</h2>
+          </div>
+          <dl class="stat-list">
+            <div><dt>关节球</dt><dd id="joint-count">0</dd></div>
+            <div><dt>Link</dt><dd id="link-count">0</dd></div>
+            <div><dt>边</dt><dd id="edge-count">0</dd></div>
+            <div><dt>工具</dt><dd id="tool-name">draw</dd></div>
+            <div><dt>对称</dt><dd id="symmetry-state">开</dd></div>
+          </dl>
+        </aside>
+      </div>
+    </div>
+    <script type="module" src="/demo/zsphere-lab.js"></script>
+  </body>
+</html>

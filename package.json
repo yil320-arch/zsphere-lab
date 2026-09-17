@@ -1,0 +1,17 @@
+{
+  "name": "zsphere-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Freeform ZSphere graph lab: joint + Link spheres, QWER tools, X-mirror symmetry.",
+  "scripts": {
+    "demo": "node ./demo/server.mjs",
+    "test": "node --test test/zsphere-graph.test.js"
+  },
+  "dependencies": {
+    "three": "^0.185.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
