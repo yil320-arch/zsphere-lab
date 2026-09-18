@@ -40,6 +40,68 @@
 
           <section class="control-section pose-settings">
             <div class="section-title">
+              <h2>人物 Mesh</h2>
+            </div>
+            <div class="pose-action-row">
+              <button type="button" id="import-mesh" class="wide-action">导入人物 Mesh</button>
+            </div>
+            <input id="mesh-file-input" type="file" accept=".glb,.gltf,.obj,model/gltf-binary,model/gltf+json,model/obj" hidden />
+            <label class="setting-toggle">
+              <span><strong>显示 Mesh</strong><small id="mesh-file-label">未导入</small></span>
+              <input id="mesh-visible-toggle" type="checkbox" checked disabled />
+              <span class="toggle-track" aria-hidden="true"></span>
+            </label>
+            <label class="fit-range-control">
+              <span>
+                <strong>Mesh 缩放</strong>
+                <small>单位未知时先缩小再对齐</small>
+              </span>
+              <output id="mesh-scale-output">1.00×</output>
+              <input id="mesh-scale" type="range" min="0.001" max="5" step="0.001" value="1" disabled />
+            </label>
+            <label class="fit-range-control">
+              <span>
+                <strong>目标身高 (m)</strong>
+                <small>可自由填写，再点下方按钮</small>
+              </span>
+              <input id="mesh-fit-height-input" type="number" min="0.05" max="100" step="0.01" value="1.7" disabled />
+            </label>
+            <div class="pose-action-row">
+              <button type="button" id="mesh-fit-height" disabled>缩放到该高度</button>
+              <button type="button" id="mesh-scale-reset" disabled>缩放复位</button>
+            </div>
+            <label class="fit-range-control">
+              <span>
+                <strong>Mesh 透明度</strong>
+                <small>半透明方便对齐 Z 球</small>
+              </span>
+              <output id="mesh-opacity-output">45%</output>
+              <input id="mesh-opacity" type="range" min="0.1" max="1" step="0.05" value="0.45" disabled />
+            </label>
+            <label class="setting-toggle">
+              <span><strong>Z 球总可见</strong><small>开：Mesh 不挡 Z 球 · V（球与球仍互挡）</small></span>
+              <input id="z-always-visible-toggle" type="checkbox" checked disabled />
+              <span class="toggle-track" aria-hidden="true"></span>
+            </label>
+            <div class="pose-action-row">
+              <button type="button" id="remove-mesh" disabled>移除 Mesh</button>
+            </div>
+          </section>
+
+          <section class="control-section pose-settings">
+            <div class="section-title">
+              <h2>场景</h2>
+            </div>
+            <div class="pose-action-row">
+              <button type="button" id="save-scene" class="wide-action">保存场景</button>
+              <button type="button" id="load-scene">打开场景</button>
+            </div>
+            <input id="scene-file-input" type="file" accept=".json,.zscene.json,application/json" hidden />
+            <p class="group-note">保存为 <code>.zscene.json</code>：含 Z 球图 + 已导入 Mesh（嵌入 glTF）。Ctrl+S 保存。</p>
+          </section>
+
+          <section class="control-section pose-settings">
+            <div class="section-title">
               <h2>工具模式</h2>
               <span id="tool-status">Q · 创建</span>
             </div>
@@ -68,7 +130,7 @@
               <span class="toggle-track" aria-hidden="true"></span>
             </label>
             <p class="group-note" id="tool-hint">
-              根 Joint 用独立按钮。Q：先点选关节球，再在其上拖动延伸。点选 Link 后短时间连按两次 Q 升级。
+              根 Joint 用独立按钮。Q：先点选关节球，再在其上拖动延伸。点选 Link 后短时间连按两次 Q 升级。Ctrl+Z 撤销 / Ctrl+Y 或 Ctrl+Shift+Z 重做。
             </p>
             <div class="pose-action-row">
               <button type="button" id="clear-graph">清空</button>
@@ -91,7 +153,7 @@
             <button type="button" id="view-reset">复位</button>
           </div>
           <div class="interaction-hint" id="interaction-hint">
-            <kbd>Q</kbd> 延伸 · <kbd>W</kbd> 移动 · <kbd>E</kbd> 缩放 · <kbd>R</kbd> 旋转 · <kbd>X</kbd> 穿透 · <kbd>Del</kbd> 删除
+            <kbd>Q</kbd> 延伸 · <kbd>W</kbd> 移动 · <kbd>E</kbd> 缩放 · <kbd>R</kbd> 旋转 · <kbd>V</kbd> Z球总可见 · <kbd>Ctrl+S</kbd> 保存
           </div>
         </main>
 
@@ -106,6 +168,7 @@
             <div><dt>边</dt><dd id="edge-count">0</dd></div>
             <div><dt>工具</dt><dd id="tool-name">draw</dd></div>
             <div><dt>对称</dt><dd id="symmetry-state">开</dd></div>
+            <div><dt>Mesh</dt><dd id="mesh-state">无</dd></div>
           </dl>
         </aside>
       </div>

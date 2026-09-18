@@ -80,6 +80,15 @@ function uid(prefix) {
   return prefix + '_' + (nextId++);
 }
 
+function peekNextId() {
+  return nextId;
+}
+
+function ensureNextIdAtLeast(value) {
+  const n = Number(value);
+  if (Number.isFinite(n) && n > nextId) nextId = Math.floor(n);
+}
+
 function clampRadius(radius) {
   return Math.min(MAX_RADIUS, Math.max(MIN_RADIUS, radius));
 }
@@ -222,6 +231,73 @@ export class ZSphereGraph {
     this.selectedId = null;
     this.orbitCenterId = null;
     this._pickables = [];
+  }
+
+  /**
+   * Snapshot joint topology only — Link chains regenerate on restore.
+   * Used by Ctrl+Z history (opaque JSON-safe plain data).
+   */
+  captureState() {
+    const joints = [];
+    for (const node of this.nodes.values()) {
+      if (node.role !== 'joint') continue;
+      joints.push({
+        id: node.id,
+        x: node.position.x,
+        y: node.position.y,
+        z: node.position.z,
+        radius: node.radius,
+        parentId: node.parentId ?? null,
+        mirrorOf: node.mirrorOf ?? null,
+        symmetryBound: node.symmetryBound === true,
+        centerAxis: node.centerAxis === true
+      });
+    }
+    return {
+      version: 1,
+      nextId: peekNextId(),
+      selectedId: this.selectedId,
+      joints
+    };
+  }
+
+  /**
+   * Replace the live graph with a previous captureState() snapshot.
+   * Clears selection orbit pivot; caller should refresh lab gizmos.
+   */
+  restoreState(state) {
+    if (!state || !Array.isArray(state.joints)) return false;
+    this.clear();
+    ensureNextIdAtLeast(state.nextId);
+
+    for (const joint of state.joints) {
+      if (!joint?.id) continue;
+      const node = this._registerNode({
+        id: joint.id,
+        role: 'joint',
+        position: new Vector3(joint.x, joint.y, joint.z),
+        radius: clampRadius(joint.radius ?? DEFAULT_JOINT_RADIUS),
+        mirrorOf: joint.mirrorOf ?? null,
+        parentId: null
+      });
+      node.symmetryBound = joint.symmetryBound === true;
+      node.centerAxis = joint.centerAxis === true;
+      node.mirrorOf = joint.mirrorOf ?? null;
+    }
+
+    for (const joint of state.joints) {
+      if (!joint?.id || !joint.parentId) continue;
+      if (!this.nodes.has(joint.id) || !this.nodes.has(joint.parentId)) continue;
+      this.connectJoints(joint.parentId, joint.id);
+    }
+
+    this.selectedId = state.selectedId && this.nodes.has(state.selectedId)
+      ? state.selectedId
+      : null;
+    this.orbitCenterId = null;
+    this._rebuildPickables();
+    this._paintSelection();
+    return true;
   }
 
   _mat(color, { dark = false } = {}) {

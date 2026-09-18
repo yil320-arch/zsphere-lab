@@ -386,3 +386,26 @@ test('deleting an intermediate Joint splices its children back to its parent', (
   assert.equal(graph.edges.size, 1);
   graph.dispose();
 });
+
+test('captureState / restoreState round-trips joint topology and selection', () => {
+  const graph = new ZSphereGraph();
+  const root = graph.createRootJoint(new Vector3(0, 1, 0));
+  const child = graph.createJoint(new Vector3(0.25, 1.2, 0), { parentJointId: root.id });
+  const mirrorId = child.mirrorOf;
+  graph.select(child.id);
+  const snap = graph.captureState();
+  assert.equal(snap.joints.length, 3);
+  assert.equal(snap.selectedId, child.id);
+
+  graph.createJoint(new Vector3(0.4, 1.4, 0), { parentJointId: child.id });
+  assert.ok([...graph.nodes.values()].filter((n) => n.role === 'joint').length > 3);
+
+  assert.equal(graph.restoreState(snap), true);
+  assert.equal([...graph.nodes.values()].filter((n) => n.role === 'joint').length, 3);
+  assert.equal(graph.nodes.has(child.id), true);
+  assert.equal(graph.nodes.has(mirrorId), true);
+  assert.equal(graph.getSelected()?.id, child.id);
+  assert.equal(graph.nodes.get(child.id).parentId, root.id);
+  assert.ok(graph.edges.size >= 2);
+  graph.dispose();
+});

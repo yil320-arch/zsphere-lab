@@ -10,6 +10,19 @@ import {
   pickNodeHit,
   setPointerFromEvent
 } from './ZSphereGraph.js';
+import { ZSphereHistory } from './ZSphereHistory.js';
+import {
+  SCENE_EXTENSION,
+  applyMeshOpacity,
+  createSceneDocument,
+  deserializeMeshPayload,
+  disposeObjectTree,
+  downloadJson,
+  parseMeshFile,
+  parseSceneDocument,
+  prepareImportedMeshes,
+  serializeMeshRoot
+} from './ZSphereSceneIO.js';
 
 const canvas = document.querySelector('#scene-canvas');
 const viewport = document.querySelector('#viewport');
@@ -27,7 +40,24 @@ const linkCountEl = document.querySelector('#link-count');
 const edgeCountEl = document.querySelector('#edge-count');
 const toolNameEl = document.querySelector('#tool-name');
 const symmetryStateEl = document.querySelector('#symmetry-state');
+const meshStateEl = document.querySelector('#mesh-state');
 const runtimeLabel = document.querySelector('#runtime-label');
+const importMeshBtn = document.querySelector('#import-mesh');
+const meshFileInput = document.querySelector('#mesh-file-input');
+const meshVisibleToggle = document.querySelector('#mesh-visible-toggle');
+const meshOpacityInput = document.querySelector('#mesh-opacity');
+const meshOpacityOutput = document.querySelector('#mesh-opacity-output');
+const zAlwaysVisibleToggle = document.querySelector('#z-always-visible-toggle');
+const meshScaleInput = document.querySelector('#mesh-scale');
+const meshScaleOutput = document.querySelector('#mesh-scale-output');
+const meshFitHeightBtn = document.querySelector('#mesh-fit-height');
+const meshFitHeightInput = document.querySelector('#mesh-fit-height-input');
+const meshScaleResetBtn = document.querySelector('#mesh-scale-reset');
+const meshFileLabel = document.querySelector('#mesh-file-label');
+const removeMeshBtn = document.querySelector('#remove-mesh');
+const saveSceneBtn = document.querySelector('#save-scene');
+const loadSceneBtn = document.querySelector('#load-scene');
+const sceneFileInput = document.querySelector('#scene-file-input');
 
 /** @type {'draw'|'move'|'scale'|'rotate'} */
 let tool = 'draw';
@@ -47,6 +77,55 @@ const DRAW_DRAG_THRESHOLD_PX = 10;
 const PROMOTE_DOUBLE_Q_MS = 400;
 /** Timestamp of the previous Q key while a Link is selected (0 = none). */
 let lastPromoteQAt = 0;
+
+const history = new ZSphereHistory({ limit: 64 });
+
+function pushHistory(label) {
+  history.push(label, graph.captureState());
+}
+
+function applyRestoredGraph() {
+  drawing = null;
+  scaling = null;
+  rotating = null;
+  rotateBound = false;
+  resetPromoteQArm();
+  if (activePointerId != null && canvas.hasPointerCapture?.(activePointerId)) {
+    canvas.releasePointerCapture(activePointerId);
+  }
+  activePointerId = null;
+  controls.enabled = true;
+  transform.detach();
+  graph.clearOrbitCenter();
+  syncGizmo();
+  syncReadout();
+}
+
+function undoEdit() {
+  const label = history.undo(
+    () => graph.captureState(),
+    (state) => graph.restoreState(state)
+  );
+  if (!label) {
+    runtimeLabel.textContent = '没有可撤销的操作';
+    return;
+  }
+  applyRestoredGraph();
+  runtimeLabel.textContent = '已撤销：' + label;
+}
+
+function redoEdit() {
+  const label = history.redo(
+    () => graph.captureState(),
+    (state) => graph.restoreState(state)
+  );
+  if (!label) {
+    runtimeLabel.textContent = '没有可重做的操作';
+    return;
+  }
+  applyRestoredGraph();
+  runtimeLabel.textContent = '已重做：' + label;
+}
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#101214');
@@ -76,6 +155,13 @@ transformHelper.visible = false;
 scene.add(transformHelper);
 transform.addEventListener('dragging-changed', (event) => {
   controls.enabled = !event.value;
+  if (event.value) {
+    if (tool === 'move') {
+      pushHistory('移动');
+    } else if (tool === 'rotate' && rotateBound) {
+      pushHistory('旋转');
+    }
+  }
 });
 transform.addEventListener('objectChange', () => {
   if (tool === 'move') {
@@ -124,6 +210,280 @@ scene.add(grid);
 
 const graph = new ZSphereGraph({ xray: false });
 scene.add(graph.root);
+
+/** @type {THREE.Object3D|null} */
+let characterMeshRoot = null;
+/** @type {THREE.Mesh[]} */
+let characterMeshes = [];
+let characterMeshFileName = '';
+
+/** Uniform scale applied to the imported character root (unknown source units). */
+const MESH_SCALE_MIN = 0.001;
+const MESH_SCALE_MAX = 5;
+const MESH_FIT_HEIGHT_MIN = 0.05;
+const MESH_FIT_HEIGHT_MAX = 100;
+/** Default target height (m) shown in the free-entry field. */
+const MESH_FIT_HEIGHT_DEFAULT = 1.7;
+
+function clampMeshScale(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 1;
+  return THREE.MathUtils.clamp(n, MESH_SCALE_MIN, MESH_SCALE_MAX);
+}
+
+function clampFitHeight(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return MESH_FIT_HEIGHT_DEFAULT;
+  return THREE.MathUtils.clamp(n, MESH_FIT_HEIGHT_MIN, MESH_FIT_HEIGHT_MAX);
+}
+
+function readFitTargetHeight() {
+  return clampFitHeight(meshFitHeightInput.value);
+}
+
+function formatMeshScale(value) {
+  const n = clampMeshScale(value);
+  if (n < 0.01) return n.toFixed(3) + '×';
+  if (n < 1) return n.toFixed(3) + '×';
+  return n.toFixed(2) + '×';
+}
+
+function getCharacterMeshHeight() {
+  if (!characterMeshRoot) return 0;
+  characterMeshRoot.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(characterMeshRoot);
+  if (box.isEmpty()) return 0;
+  return Math.max(0, box.max.y - box.min.y);
+}
+
+function syncMeshScaleControl(scale) {
+  const next = clampMeshScale(scale);
+  // Range inputs cannot express every float; keep attribute in sync for readout.
+  meshScaleInput.value = String(next);
+  meshScaleOutput.textContent = formatMeshScale(next);
+}
+
+function applyCharacterMeshScale(scale, { announce = false } = {}) {
+  if (!characterMeshRoot) return;
+  const next = clampMeshScale(scale);
+  characterMeshRoot.scale.setScalar(next);
+  characterMeshRoot.updateMatrixWorld(true);
+  syncMeshScaleControl(next);
+  syncMeshUi();
+  if (announce) {
+    const height = getCharacterMeshHeight();
+    runtimeLabel.textContent = 'Mesh 缩放 '
+      + formatMeshScale(next)
+      + (height > 0 ? ' · 当前高度约 ' + height.toFixed(3) + ' m' : '');
+  }
+}
+
+function fitCharacterMeshHeight(targetHeight = readFitTargetHeight()) {
+  if (!characterMeshRoot) return;
+  const target = clampFitHeight(targetHeight);
+  meshFitHeightInput.value = String(target);
+  const currentScale = characterMeshRoot.scale.x || 1;
+  const height = getCharacterMeshHeight();
+  if (height < 1e-8) {
+    runtimeLabel.textContent = '无法测量 Mesh 高度';
+    return;
+  }
+  const nativeHeight = height / currentScale;
+  if (nativeHeight < 1e-8) {
+    runtimeLabel.textContent = '无法测量 Mesh 高度';
+    return;
+  }
+  applyCharacterMeshScale(target / nativeHeight, { announce: true });
+  runtimeLabel.textContent = '已缩放到约 '
+    + target.toFixed(2) + ' m 高（原高度 '
+    + nativeHeight.toFixed(3) + ' → 现 '
+    + getCharacterMeshHeight().toFixed(3) + '）';
+}
+
+function refreshCharacterMeshAppearance() {
+  if (!characterMeshes.length) return;
+  applyMeshOpacity(characterMeshes, Number(meshOpacityInput.value), {
+    zAlwaysVisible: zAlwaysVisibleToggle.checked
+  });
+}
+
+function syncMeshUi() {
+  const hasMesh = Boolean(characterMeshRoot);
+  meshVisibleToggle.disabled = !hasMesh;
+  meshOpacityInput.disabled = !hasMesh;
+  zAlwaysVisibleToggle.disabled = !hasMesh;
+  meshScaleInput.disabled = !hasMesh;
+  meshFitHeightBtn.disabled = !hasMesh;
+  meshFitHeightInput.disabled = !hasMesh;
+  meshScaleResetBtn.disabled = !hasMesh;
+  removeMeshBtn.disabled = !hasMesh;
+  if (!hasMesh) {
+    meshFileLabel.textContent = '未导入';
+    meshStateEl.textContent = '无';
+    meshVisibleToggle.checked = true;
+    syncMeshScaleControl(1);
+    return;
+  }
+  meshFileLabel.textContent = characterMeshFileName || '已导入';
+  const verts = characterMeshes.reduce(
+    (sum, mesh) => sum + (mesh.geometry?.getAttribute('position')?.count || 0),
+    0
+  );
+  const height = getCharacterMeshHeight();
+  meshStateEl.textContent = verts.toLocaleString() + ' v'
+    + (height > 0 ? ' · h≈' + height.toFixed(2) : '');
+  meshVisibleToggle.checked = characterMeshRoot.visible;
+  syncMeshScaleControl(characterMeshRoot.scale.x || 1);
+  const opacity = Number(meshOpacityInput.value);
+  meshOpacityOutput.textContent = Math.round(opacity * 100) + '%';
+}
+
+function clearCharacterMesh() {
+  if (!characterMeshRoot) return;
+  disposeObjectTree(characterMeshRoot);
+  characterMeshRoot = null;
+  characterMeshes = [];
+  characterMeshFileName = '';
+  syncMeshUi();
+}
+
+function setCharacterMesh(root, meshes, fileName) {
+  clearCharacterMesh();
+  characterMeshRoot = root;
+  characterMeshRoot.name = 'CharacterMesh';
+  characterMeshes = meshes;
+  characterMeshFileName = fileName || 'character';
+  scene.add(characterMeshRoot);
+  characterMeshRoot.visible = meshVisibleToggle.checked;
+  // Keep authoring scale if the loader already set one; otherwise start at 1×.
+  if (!Number.isFinite(characterMeshRoot.scale.x) || characterMeshRoot.scale.x <= 0) {
+    characterMeshRoot.scale.setScalar(1);
+  }
+  refreshCharacterMeshAppearance();
+  syncMeshUi();
+}
+
+async function importCharacterMeshFile(file) {
+  if (!file) return;
+  runtimeLabel.textContent = '正在导入 Mesh…';
+  try {
+    const content = await parseMeshFile(file);
+    const { meshes, vertexCount } = prepareImportedMeshes(content);
+    setCharacterMesh(content, meshes, file.name);
+    const nativeHeight = getCharacterMeshHeight();
+    runtimeLabel.textContent = '已导入 '
+      + file.name + ' · ' + meshes.length + ' 网格 · '
+      + vertexCount.toLocaleString() + ' 顶点'
+      + (nativeHeight > 0 ? ' · 高度约 ' + nativeHeight.toFixed(3) : '')
+      + ' · 可填目标身高后点「缩放到该高度」';
+  } catch (error) {
+    runtimeLabel.textContent = '导入失败：' + (error?.message || error);
+  }
+}
+
+async function saveSceneToFile() {
+  runtimeLabel.textContent = '正在保存场景…';
+  try {
+    // Capture graph first so Z-ball state matches what the user sees now.
+    const graphState = graph.captureState();
+    const jointCount = graphState.joints.length;
+    const meshHeightBefore = characterMeshRoot ? getCharacterMeshHeight() : 0;
+    const meshScaleBefore = characterMeshRoot ? (characterMeshRoot.scale.x || 1) : 1;
+
+    const mesh = characterMeshRoot
+      ? await serializeMeshRoot(characterMeshRoot, { fileName: characterMeshFileName })
+      : null;
+
+    // Live mesh must remain at the same authored scale after export.
+    if (characterMeshRoot) {
+      const liveScale = characterMeshRoot.scale.x || 1;
+      if (Math.abs(liveScale - meshScaleBefore) > 1e-8) {
+        throw new Error('保存后 Mesh 缩放被意外改动');
+      }
+    }
+    if (mesh?.scaleBaked && mesh.authoredScale) {
+      const authored = mesh.authoredScale[0] ?? 1;
+      if (Math.abs(authored - meshScaleBefore) > 1e-6) {
+        throw new Error('导出 Mesh 未记录当前缩放');
+      }
+    }
+
+    const doc = createSceneDocument({
+      graphState,
+      settings: {
+        symmetry: symmetryToggle.checked,
+        xray: xrayToggle.checked,
+        centerCreate: centerCreateToggle.checked,
+        meshOpacity: Number(meshOpacityInput.value),
+        meshVisible: meshVisibleToggle.checked,
+        meshFitTargetHeight: readFitTargetHeight(),
+        zAlwaysVisible: zAlwaysVisibleToggle.checked
+      },
+      mesh
+    });
+    if (doc.graph.joints.length !== jointCount) {
+      throw new Error('保存时 Z 球关节数量不一致');
+    }
+
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    downloadJson('zsphere-scene-' + stamp + SCENE_EXTENSION, doc);
+    runtimeLabel.textContent = '场景已保存 · 关节 '
+      + jointCount
+      + (mesh
+        ? ' · Mesh 已按当前缩放烘焙'
+          + (meshHeightBefore > 0 ? '（高≈' + meshHeightBefore.toFixed(3) + ' m）' : '')
+        : ' · 无 Mesh');
+  } catch (error) {
+    runtimeLabel.textContent = '保存失败：' + (error?.message || error);
+  }
+}
+
+async function loadSceneFromFile(file) {
+  if (!file) return;
+  runtimeLabel.textContent = '正在打开场景…';
+  try {
+    const text = await file.text();
+    const doc = parseSceneDocument(text);
+    transform.detach();
+    rotateBound = false;
+    resetPromoteQArm();
+    history.clear();
+    clearCharacterMesh();
+    graph.restoreState(doc.graph);
+
+    if (doc.settings) {
+      symmetryToggle.checked = doc.settings.symmetry !== false;
+      graph.setSymmetry(symmetryToggle.checked);
+      xrayToggle.checked = Boolean(doc.settings.xray);
+      graph.setXRay(xrayToggle.checked);
+      centerCreateToggle.checked = Boolean(doc.settings.centerCreate);
+      if (typeof doc.settings.meshOpacity === 'number') {
+        meshOpacityInput.value = String(doc.settings.meshOpacity);
+      }
+      if (typeof doc.settings.meshFitTargetHeight === 'number') {
+        meshFitHeightInput.value = String(clampFitHeight(doc.settings.meshFitTargetHeight));
+      }
+      meshVisibleToggle.checked = doc.settings.meshVisible !== false;
+      zAlwaysVisibleToggle.checked = doc.settings.zAlwaysVisible !== false;
+    }
+
+    if (doc.mesh) {
+      const loaded = await deserializeMeshPayload(doc.mesh);
+      setCharacterMesh(loaded.root, loaded.meshes, loaded.fileName);
+      characterMeshRoot.visible = meshVisibleToggle.checked;
+      refreshCharacterMeshAppearance();
+    }
+
+    syncGizmo();
+    syncReadout();
+    syncMeshUi();
+    runtimeLabel.textContent = '已打开场景'
+      + (doc.mesh ? '（含 Mesh）' : '（仅 Z 球）')
+      + ' · ' + (file.name || '');
+  } catch (error) {
+    runtimeLabel.textContent = '打开失败：' + (error?.message || error);
+  }
+}
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
@@ -239,6 +599,7 @@ function syncReadout() {
   linkCountEl.textContent = String(links);
   edgeCountEl.textContent = String(graph.edges.size);
   symmetryStateEl.textContent = graph.symmetry ? '开' : '关';
+  syncMeshUi();
   if (!selected) {
     selectedReadout.textContent = '—';
   } else {
@@ -273,6 +634,7 @@ function tryPromoteSelectedLink() {
     resetPromoteQArm();
     return true;
   }
+  pushHistory('升级 Link');
   graph.promoteLinkToJoint(selected.id);
   resetPromoteQArm();
   syncGizmo();
@@ -343,6 +705,7 @@ function beginDraw(event) {
 
 function commitDrawGesture(event) {
   if (!drawing || drawing.committed) return false;
+  pushHistory('延伸');
   const joint = drawing.centerCreate
     ? graph.extrudeCenterJointFromSurface(drawing.parentId, drawing.hitPoint, {
       radius: drawing.startRadius
@@ -351,6 +714,7 @@ function commitDrawGesture(event) {
       radius: drawing.startRadius
     });
   if (!joint) {
+    history.discardLast();
     drawing = null;
     runtimeLabel.textContent = '无法在此延伸';
     return false;
@@ -396,7 +760,8 @@ function onPointerDown(event) {
       scaling = {
         id: picked.id,
         startY: event.clientY,
-        startRadius: picked.radius
+        startRadius: picked.radius,
+        historyPushed: false
       };
       activePointerId = event.pointerId;
       canvas.setPointerCapture?.(event.pointerId);
@@ -468,7 +833,12 @@ function onPointerMove(event) {
   if (scaling) {
     const delta = scaling.startY - event.clientY;
     const next = scaling.startRadius * (1 + delta * 0.012);
-    graph.setRadius(scaling.id, THREE.MathUtils.clamp(next, MIN_RADIUS, MAX_RADIUS));
+    const clamped = THREE.MathUtils.clamp(next, MIN_RADIUS, MAX_RADIUS);
+    if (!scaling.historyPushed && Math.abs(clamped - scaling.startRadius) > 1e-6) {
+      pushHistory('缩放');
+      scaling.historyPushed = true;
+    }
+    graph.setRadius(scaling.id, clamped);
     syncReadout();
   }
 }
@@ -522,6 +892,7 @@ document.querySelector('#create-root').addEventListener('click', () => {
     runtimeLabel.textContent = '已有关节球 · 用 Q 在球面上落点延伸';
     return;
   }
+  pushHistory('放置根球');
   graph.createRootJoint(new THREE.Vector3(0, 1.0, 0), { radius: DEFAULT_JOINT_RADIUS });
   syncGizmo();
   syncReadout();
@@ -529,6 +900,8 @@ document.querySelector('#create-root').addEventListener('click', () => {
 });
 
 document.querySelector('#clear-graph').addEventListener('click', () => {
+  const hasAny = graph.nodes.size > 0;
+  if (hasAny) pushHistory('清空');
   transform.detach();
   rotateBound = false;
   resetPromoteQArm();
@@ -539,6 +912,9 @@ document.querySelector('#clear-graph').addEventListener('click', () => {
 });
 
 document.querySelector('#delete-selected').addEventListener('click', () => {
+  const selected = graph.getSelected();
+  if (!selected || selected.role !== 'joint') return;
+  pushHistory('删除');
   graph.deleteSelected();
   syncGizmo();
   syncReadout();
@@ -560,6 +936,55 @@ document.querySelector('#view-reset').addEventListener('click', () => {
   controls.update();
 });
 
+importMeshBtn.addEventListener('click', () => meshFileInput.click());
+meshFileInput.addEventListener('change', async () => {
+  const [file] = meshFileInput.files;
+  meshFileInput.value = '';
+  if (file) await importCharacterMeshFile(file);
+});
+meshVisibleToggle.addEventListener('change', () => {
+  if (!characterMeshRoot) return;
+  characterMeshRoot.visible = meshVisibleToggle.checked;
+  syncMeshUi();
+});
+meshOpacityInput.addEventListener('input', () => {
+  refreshCharacterMeshAppearance();
+  syncMeshUi();
+});
+zAlwaysVisibleToggle.addEventListener('change', () => {
+  refreshCharacterMeshAppearance();
+  runtimeLabel.textContent = zAlwaysVisibleToggle.checked
+    ? 'Z 球总可见：Mesh 不遮挡 Z 球（球与球仍互挡）'
+    : '正常遮挡：Mesh 按深度挡住 Z 球';
+});
+meshScaleInput.addEventListener('input', () => {
+  applyCharacterMeshScale(meshScaleInput.value, { announce: true });
+});
+meshFitHeightBtn.addEventListener('click', () => {
+  fitCharacterMeshHeight(readFitTargetHeight());
+});
+meshFitHeightInput.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || meshFitHeightInput.disabled) return;
+  event.preventDefault();
+  fitCharacterMeshHeight(readFitTargetHeight());
+});
+meshScaleResetBtn.addEventListener('click', () => {
+  applyCharacterMeshScale(1, { announce: true });
+});
+removeMeshBtn.addEventListener('click', () => {
+  clearCharacterMesh();
+  runtimeLabel.textContent = '已移除人物 Mesh';
+});
+saveSceneBtn.addEventListener('click', () => {
+  void saveSceneToFile();
+});
+loadSceneBtn.addEventListener('click', () => sceneFileInput.click());
+sceneFileInput.addEventListener('change', async () => {
+  const [file] = sceneFileInput.files;
+  sceneFileInput.value = '';
+  if (file) await loadSceneFromFile(file);
+});
+
 canvas.addEventListener('pointerdown', onPointerDown);
 canvas.addEventListener('pointermove', onPointerMove);
 window.addEventListener('pointerup', onPointerUp);
@@ -567,10 +992,37 @@ window.addEventListener('pointercancel', onPointerUp);
 window.addEventListener('blur', onPointerUp);
 
 window.addEventListener('keydown', (event) => {
-  if (event.defaultPrevented || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
   const tag = event.target?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || event.target?.isContentEditable) return;
+  if (event.defaultPrevented || event.repeat) return;
+
   const key = event.key.toLowerCase();
+  const mod = event.ctrlKey || event.metaKey;
+
+  if (mod && !event.altKey && key === 'z') {
+    event.preventDefault();
+    if (event.shiftKey) redoEdit();
+    else undoEdit();
+    return;
+  }
+  if (mod && !event.altKey && key === 'y') {
+    event.preventDefault();
+    redoEdit();
+    return;
+  }
+  if (mod && !event.altKey && key === 's') {
+    event.preventDefault();
+    void saveSceneToFile();
+    return;
+  }
+  if (mod && !event.altKey && key === 'o') {
+    event.preventDefault();
+    sceneFileInput.click();
+    return;
+  }
+
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+
   if (key === 'q') {
     event.preventDefault();
     const selected = graph.getSelected();
@@ -597,9 +1049,23 @@ window.addEventListener('keydown', (event) => {
     event.preventDefault();
     xrayToggle.checked = !xrayToggle.checked;
     graph.setXRay(xrayToggle.checked);
+  } else if (key === 'v') {
+    event.preventDefault();
+    if (!characterMeshRoot) {
+      runtimeLabel.textContent = '请先导入人物 Mesh，再切换 Z 球总可见';
+      return;
+    }
+    zAlwaysVisibleToggle.checked = !zAlwaysVisibleToggle.checked;
+    refreshCharacterMeshAppearance();
+    runtimeLabel.textContent = zAlwaysVisibleToggle.checked
+      ? 'Z 球总可见：Mesh 不遮挡 Z 球（球与球仍互挡）'
+      : '正常遮挡：Mesh 按深度挡住 Z 球';
   } else if (key === 'delete' || key === 'backspace') {
     event.preventDefault();
     resetPromoteQArm();
+    const selected = graph.getSelected();
+    if (!selected || selected.role !== 'joint') return;
+    pushHistory('删除');
     graph.deleteSelected();
     syncGizmo();
     syncReadout();
@@ -615,6 +1081,7 @@ function frame() {
 
 setTool('draw');
 syncReadout();
-runtimeLabel.textContent = '根关节用独立按钮；Q 先点选再拖动延伸；Link 点选后连按两次 Q 升级';
-toolDescription.textContent = '根 Joint 用独立按钮。Q：先点选父球再拖动延伸；点选 Link 后短时间连按两次 Q 升级。';
+syncMeshUi();
+runtimeLabel.textContent = '可导入人物 Mesh；编 Z 球后 Ctrl+S 保存场景';
+toolDescription.textContent = '导入 Mesh 对齐编骨。Q：先点选再延伸；场景保存为 .zscene.json（Z 球 + Mesh）。';
 frame();
