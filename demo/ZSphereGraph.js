@@ -62,7 +62,8 @@ const LINK_SPACING_FACTOR = 0.45;
  * (avoids packing too many spheres into a collapsed frustum).
  */
 const LINK_CLOSE_DIST_FACTOR = 0.55;
-const MIN_RADIUS = 0.012;
+/** World units on a ~1.7m figure — small enough for distal finger/toe joints. */
+const MIN_RADIUS = 0.003;
 const MAX_RADIUS = 0.22;
 const MAX_LINKS_PER_EDGE = 128;
 const SYMMETRY_EPSILON = 1e-4;
@@ -157,6 +158,8 @@ export class ZSphereGraph {
   constructor({ xray = false } = {}) {
     this.xray = Boolean(xray);
     this.symmetry = true;
+    /** Draw after translucent character mesh (Lab「Z 球总可见」). */
+    this.drawAboveMesh = false;
     this.root = new Group();
     this.root.name = 'ZSphereGraph';
     this.nodes = new Map();
@@ -198,17 +201,34 @@ export class ZSphereGraph {
     }
   }
 
+  /**
+   * When true, draw spheres after a translucent character mesh so they stay
+   * visible through it (mesh must use depthWrite=false). Sphere↔sphere depth
+   * testing is unchanged.
+   */
+  setDrawAboveMesh(enabled) {
+    this.drawAboveMesh = Boolean(enabled);
+    this._applyDrawOrder();
+  }
+
+  _applyDrawOrder() {
+    const base = this.drawAboveMesh ? 10 : 0;
+    for (const node of this.nodes.values()) {
+      if (node.mesh) node.mesh.renderOrder = base;
+      if (node.outline) node.outline.renderOrder = base + 1;
+    }
+  }
+
   setXRay(xray) {
     this.xray = Boolean(xray);
     for (const node of this.nodes.values()) {
       this._applySurfaceStyle(node.mesh.material, node.role);
-      node.mesh.renderOrder = 0;
       if (node.outline) {
         node.outline.material.depthTest = true;
         node.outline.material.depthWrite = false;
-        node.outline.renderOrder = 1;
       }
     }
+    this._applyDrawOrder();
     this._paintSelection();
   }
 
@@ -374,6 +394,7 @@ export class ZSphereGraph {
     };
     this.nodes.set(id, node);
     this.root.add(mesh);
+    this._applyDrawOrder();
     this._rebuildPickables();
     return node;
   }

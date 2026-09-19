@@ -23,6 +23,11 @@ import {
   prepareImportedMeshes,
   serializeMeshRoot
 } from './ZSphereSceneIO.js';
+import {
+  createBoundPreview,
+  downloadArrayBuffer,
+  exportBoundPreviewGlb
+} from './ZSphereBind.js';
 
 const canvas = document.querySelector('#scene-canvas');
 const viewport = document.querySelector('#viewport');
@@ -58,6 +63,20 @@ const removeMeshBtn = document.querySelector('#remove-mesh');
 const saveSceneBtn = document.querySelector('#save-scene');
 const loadSceneBtn = document.querySelector('#load-scene');
 const sceneFileInput = document.querySelector('#scene-file-input');
+const enterPreviewBtn = document.querySelector('#enter-preview');
+const exitPreviewBtn = document.querySelector('#exit-preview');
+const exportGlbBtn = document.querySelector('#export-glb');
+const resetPreviewPoseBtn = document.querySelector('#reset-preview-pose');
+const voxelResolutionSelect = document.querySelector('#voxel-resolution');
+const visibilityGateToggle = document.querySelector('#visibility-gate-toggle');
+const previewEntrySection = document.querySelector('#preview-entry-section');
+const previewControlsSection = document.querySelector('#preview-controls-section');
+const editToolsSection = document.querySelector('#edit-tools-section');
+const previewModeBadge = document.querySelector('#preview-mode-badge');
+const previewBoneReadout = document.querySelector('#preview-bone-readout');
+const previewWeightReadout = document.querySelector('#preview-weight-readout');
+const interactionHint = document.querySelector('#interaction-hint');
+const previewInteractionHint = document.querySelector('#preview-interaction-hint');
 
 /** @type {'draw'|'move'|'scale'|'rotate'} */
 let tool = 'draw';
@@ -79,6 +98,8 @@ const PROMOTE_DOUBLE_Q_MS = 400;
 let lastPromoteQAt = 0;
 
 const history = new ZSphereHistory({ limit: 64 });
+/** Preview bone rotations only — never mixed with edit-graph history. */
+const previewHistory = new ZSphereHistory({ limit: 64 });
 
 function pushHistory(label) {
   history.push(label, graph.captureState());
@@ -127,6 +148,51 @@ function redoEdit() {
   runtimeLabel.textContent = '已重做：' + label;
 }
 
+function capturePreviewPoseState() {
+  if (!previewSession) return null;
+  return previewSession.bones.map((bone) => ({
+    id: bone.userData?.jointId || bone.name,
+    x: bone.quaternion.x,
+    y: bone.quaternion.y,
+    z: bone.quaternion.z,
+    w: bone.quaternion.w
+  }));
+}
+
+function restorePreviewPoseState(entries) {
+  if (!previewSession || !Array.isArray(entries)) return;
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  for (const bone of previewSession.bones) {
+    const id = bone.userData?.jointId || bone.name;
+    const q = byId.get(id);
+    if (!q) continue;
+    bone.quaternion.set(q.x, q.y, q.z, q.w);
+  }
+  previewSession.armature.updateMatrixWorld(true);
+  previewSession.skeleton.update();
+  syncPreviewBoneGizmo();
+}
+
+function undoPreviewPose() {
+  if (!previewSession) return;
+  const label = previewHistory.undo(capturePreviewPoseState, restorePreviewPoseState);
+  if (!label) {
+    runtimeLabel.textContent = '没有可撤销的预览姿态';
+    return;
+  }
+  runtimeLabel.textContent = '已撤销预览：' + label;
+}
+
+function redoPreviewPose() {
+  if (!previewSession) return;
+  const label = previewHistory.redo(capturePreviewPoseState, restorePreviewPoseState);
+  if (!label) {
+    runtimeLabel.textContent = '没有可重做的预览姿态';
+    return;
+  }
+  runtimeLabel.textContent = '已重做预览：' + label;
+}
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#101214');
 scene.fog = new THREE.Fog('#101214', 6, 14);
@@ -155,6 +221,12 @@ transformHelper.visible = false;
 scene.add(transformHelper);
 transform.addEventListener('dragging-changed', (event) => {
   controls.enabled = !event.value;
+  if (isPreviewMode()) {
+    if (event.value && previewSelectedBone && !previewSelectedBone.userData?.staticUncovered) {
+      previewHistory.push('旋转骨骼', capturePreviewPoseState());
+    }
+    return;
+  }
   if (event.value) {
     if (tool === 'move') {
       pushHistory('移动');
@@ -164,6 +236,13 @@ transform.addEventListener('dragging-changed', (event) => {
   }
 });
 transform.addEventListener('objectChange', () => {
+  if (isPreviewMode()) {
+    if (previewSession) {
+      previewSession.armature.updateMatrixWorld(true);
+      previewSession.skeleton.update();
+    }
+    return;
+  }
   if (tool === 'move') {
     const selected = graph.getSelected();
     if (!selected || selected.role !== 'joint') return;
@@ -216,6 +295,18 @@ let characterMeshRoot = null;
 /** @type {THREE.Mesh[]} */
 let characterMeshes = [];
 let characterMeshFileName = '';
+
+/** @type {'edit'|'preview'} */
+let labMode = 'edit';
+/** @type {ReturnType<typeof createBoundPreview>|null} */
+let previewSession = null;
+/** @type {THREE.SkeletonHelper|null} */
+let previewHelper = null;
+/** @type {THREE.Group|null} */
+let previewPickRoot = null;
+/** @type {THREE.Bone|null} */
+let previewSelectedBone = null;
+const previewRestQuats = new Map();
 
 /** Uniform scale applied to the imported character root (unknown source units). */
 const MESH_SCALE_MIN = 0.001;
@@ -301,10 +392,31 @@ function fitCharacterMeshHeight(targetHeight = readFitTargetHeight()) {
 }
 
 function refreshCharacterMeshAppearance() {
-  if (!characterMeshes.length) return;
-  applyMeshOpacity(characterMeshes, Number(meshOpacityInput.value), {
-    zAlwaysVisible: zAlwaysVisibleToggle.checked
-  });
+  const alwaysVisible = Boolean(zAlwaysVisibleToggle?.checked);
+  if (characterMeshes.length) {
+    applyMeshOpacity(characterMeshes, Number(meshOpacityInput.value), {
+      zAlwaysVisible: alwaysVisible
+    });
+  }
+  // Transparent mesh is drawn after opaque spheres; raise sphere order so
+  // 「Z 球总可见」actually shows balls through the body.
+  graph.setDrawAboveMesh(alwaysVisible && Boolean(characterMeshRoot));
+}
+
+function setZAlwaysVisible(enabled, { announce = true } = {}) {
+  if (!characterMeshRoot) {
+    if (announce) runtimeLabel.textContent = '请先导入人物 Mesh，再切换 Z 球总可见';
+    return false;
+  }
+  zAlwaysVisibleToggle.disabled = false;
+  zAlwaysVisibleToggle.checked = Boolean(enabled);
+  refreshCharacterMeshAppearance();
+  if (announce) {
+    runtimeLabel.textContent = zAlwaysVisibleToggle.checked
+      ? 'Z 球总可见：Mesh 不遮挡 Z 球（球与球仍互挡）'
+      : '正常遮挡：Mesh 按深度挡住 Z 球';
+  }
+  return true;
 }
 
 function syncMeshUi() {
@@ -344,6 +456,7 @@ function clearCharacterMesh() {
   characterMeshRoot = null;
   characterMeshes = [];
   characterMeshFileName = '';
+  graph.setDrawAboveMesh(false);
   syncMeshUi();
 }
 
@@ -359,8 +472,299 @@ function setCharacterMesh(root, meshes, fileName) {
   if (!Number.isFinite(characterMeshRoot.scale.x) || characterMeshRoot.scale.x <= 0) {
     characterMeshRoot.scale.setScalar(1);
   }
+  // Opaque mesh + normal depth occlusion by default.
+  zAlwaysVisibleToggle.disabled = false;
+  zAlwaysVisibleToggle.checked = false;
+  meshOpacityInput.value = '1';
+  meshOpacityOutput.textContent = '100%';
   refreshCharacterMeshAppearance();
   syncMeshUi();
+}
+
+function isPreviewMode() {
+  return labMode === 'preview';
+}
+
+function syncPreviewUi() {
+  const preview = isPreviewMode();
+  document.body.classList.toggle('is-preview-mode', preview);
+  previewControlsSection?.classList.toggle('is-hidden', !preview);
+  previewEntrySection?.classList.toggle('is-hidden', preview);
+  editToolsSection?.classList.toggle('is-hidden', preview);
+  previewModeBadge?.classList.toggle('is-hidden', !preview);
+  interactionHint?.classList.toggle('is-hidden', preview);
+  previewInteractionHint?.classList.toggle('is-hidden', !preview);
+
+  if (importMeshBtn) importMeshBtn.disabled = preview;
+  if (saveSceneBtn) saveSceneBtn.disabled = preview;
+  if (loadSceneBtn) loadSceneBtn.disabled = preview;
+  if (removeMeshBtn) removeMeshBtn.disabled = preview || !characterMeshRoot;
+  if (meshFitHeightBtn) meshFitHeightBtn.disabled = preview || !characterMeshRoot;
+  if (meshScaleResetBtn) meshScaleResetBtn.disabled = preview || !characterMeshRoot;
+  if (meshScaleInput) meshScaleInput.disabled = preview || !characterMeshRoot;
+  if (meshFitHeightInput) meshFitHeightInput.disabled = preview || !characterMeshRoot;
+  if (meshVisibleToggle) meshVisibleToggle.disabled = preview || !characterMeshRoot;
+  if (meshOpacityInput) meshOpacityInput.disabled = preview || !characterMeshRoot;
+  if (zAlwaysVisibleToggle) zAlwaysVisibleToggle.disabled = preview || !characterMeshRoot;
+
+  if (!preview) syncMeshUi();
+
+  if (!preview || !previewSelectedBone) {
+    if (previewBoneReadout) previewBoneReadout.textContent = '—';
+  } else if (previewBoneReadout) {
+    previewBoneReadout.textContent = previewSelectedBone.name
+      + ' · r='
+      + Number(previewSelectedBone.userData.envelopeRadius || 0).toFixed(3);
+  }
+}
+
+function clearPreviewPickers() {
+  if (!previewSession) {
+    previewPickRoot = null;
+    return;
+  }
+  for (const bone of previewSession.bones) {
+    const doomed = bone.children.filter((child) => child.userData?.previewBone);
+    for (const pick of doomed) {
+      pick.geometry?.dispose?.();
+      pick.material?.dispose?.();
+      bone.remove(pick);
+    }
+  }
+  previewPickRoot = null;
+}
+
+function buildPreviewPickers(session) {
+  clearPreviewPickers();
+  for (const bone of session.bones) {
+    if (bone.userData?.staticUncovered) continue;
+    const radius = Math.max(0.03, Number(bone.userData.envelopeRadius || 0.05) * 0.85);
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 12, 10),
+      new THREE.MeshBasicMaterial({
+        color: '#7ec8e8',
+        transparent: true,
+        opacity: 0.28,
+        depthTest: true
+      })
+    );
+    sphere.name = 'pick:' + bone.name;
+    sphere.userData.previewBone = bone;
+    sphere.scale.setScalar(radius);
+    bone.add(sphere);
+  }
+}
+
+function getPreviewPickables() {
+  if (!previewSession) return [];
+  return previewSession.bones.flatMap((bone) => (
+    bone.children.filter((child) => child.userData?.previewBone)
+  ));
+}
+
+function capturePreviewRestPose(session) {
+  previewRestQuats.clear();
+  for (const bone of session.bones) {
+    previewRestQuats.set(bone, bone.quaternion.clone());
+  }
+}
+
+function resetPreviewPose() {
+  if (!previewSession) return;
+  for (const bone of previewSession.bones) {
+    const rest = previewRestQuats.get(bone);
+    if (rest) bone.quaternion.copy(rest);
+    else bone.quaternion.identity();
+  }
+  previewHistory.clear();
+  previewSession.armature.updateMatrixWorld(true);
+  previewSession.skeleton.update();
+  syncPreviewBoneGizmo();
+  runtimeLabel.textContent = '预览姿态已复位（绑定姿态）';
+}
+
+function syncPreviewBoneGizmo() {
+  if (!isPreviewMode() || !previewSelectedBone) {
+    if (tool === 'move' || tool === 'rotate') {
+      // edit gizmo path; leave alone when not preview
+    }
+    if (isPreviewMode()) {
+      transform.detach();
+      transformHelper.visible = false;
+      transform.enabled = false;
+    }
+    return;
+  }
+  transform.setMode('rotate');
+  transform.setSpace('local');
+  transform.attach(previewSelectedBone);
+  transformHelper.visible = true;
+  transform.enabled = true;
+  transform.showX = true;
+  transform.showY = true;
+  transform.showZ = true;
+}
+
+function selectPreviewBone(bone) {
+  previewSelectedBone = bone || null;
+  for (const pick of getPreviewPickables()) {
+    const active = pick.userData.previewBone === previewSelectedBone;
+    pick.material.opacity = active ? 0.55 : 0.28;
+    pick.material.color.set(active ? '#ffe0a8' : '#7ec8e8');
+  }
+  syncPreviewUi();
+  syncPreviewBoneGizmo();
+}
+
+function disposePreviewSession() {
+  selectPreviewBone(null);
+  transform.detach();
+  transformHelper.visible = false;
+  transform.enabled = false;
+  transform.setSpace('world');
+  clearPreviewPickers();
+  if (previewHelper) {
+    previewHelper.removeFromParent();
+    previewHelper.dispose?.();
+    previewHelper = null;
+  }
+  if (previewSession) {
+    previewSession.dispose();
+    previewSession = null;
+  }
+  previewRestQuats.clear();
+  previewHistory.clear();
+}
+
+function readVoxelResolution() {
+  const raw = Number(voxelResolutionSelect?.value);
+  if (!Number.isFinite(raw)) return 64;
+  return Math.max(48, Math.min(128, Math.round(raw)));
+}
+
+function enterPreviewMode() {
+  if (isPreviewMode()) return;
+  const jointCount = [...graph.nodes.values()].filter((n) => n.role === 'joint').length;
+  if (jointCount === 0) {
+    runtimeLabel.textContent = '请先放置关节球，再进入预览';
+    return;
+  }
+  if (!characterMeshRoot || characterMeshes.length === 0) {
+    runtimeLabel.textContent = '请先导入人物 Mesh，再进入预览';
+    return;
+  }
+
+  // End any in-progress edit gesture before freezing a snapshot.
+  drawing = null;
+  scaling = null;
+  rotating = null;
+  rotateBound = false;
+  resetPromoteQArm();
+  transform.detach();
+  graph.clearOrbitCenter();
+
+  const voxelRes = readVoxelResolution();
+  const useVisibilityGate = visibilityGateToggle ? visibilityGateToggle.checked : true;
+  runtimeLabel.textContent = '正在生成骨骼与自动蒙皮（体素 ' + voxelRes
+    + (useVisibilityGate ? ' · 可见性开' : ' · 可见性关') + '）…';
+  try {
+    const graphState = graph.captureState();
+    const session = createBoundPreview({
+      graphState,
+      meshRoot: characterMeshRoot,
+      meshes: characterMeshes,
+      maxResolution: voxelRes,
+      useVisibilityGate
+    });
+    previewSession = session;
+    capturePreviewRestPose(session);
+    previewHistory.clear();
+    buildPreviewPickers(session);
+
+    previewHelper = new THREE.SkeletonHelper(session.armature);
+    previewHelper.visible = true;
+    scene.add(session.container);
+    scene.add(previewHelper);
+
+    graph.root.visible = false;
+    if (characterMeshRoot) characterMeshRoot.visible = false;
+
+    labMode = 'preview';
+    syncPreviewUi();
+
+    const stats = session.weightStats[0];
+    const uncovered = stats?.uncoveredVertices || 0;
+    if (previewWeightReadout && stats) {
+      const method = stats.method === 'voxelBind' ? '体素测地' : '包络回退';
+      const poseBones = stats.poseBoneCount ?? Math.max(0, (stats.boneCount || 0) - 1);
+      const gridLabel = stats.grid
+        ? ' · 体素' + voxelRes + ' → ' + stats.grid.sx + '×' + stats.grid.sy + '×' + stats.grid.sz
+        : ' · 体素' + voxelRes;
+      previewWeightReadout.textContent = method + ' · '
+        + poseBones + ' 可动骨 · '
+        + stats.vertexCount.toLocaleString() + ' 顶点'
+        + gridLabel
+        + (stats.visibilityGate ? ' · 体积可见性' : '')
+        + (stats.surfaceGate ? ' · 表面门控' : '')
+        + (uncovered > 0 ? ' · 未覆盖 ' + uncovered.toLocaleString() + '（静骨）' : '')
+        + (stats.warning ? ' · ' + stats.warning : '');
+    }
+    if (uncovered > 0) {
+      runtimeLabel.textContent = '预览已就绪 · 体素 ' + voxelRes + ' · '
+        + uncovered.toLocaleString()
+        + ' 顶点无局部骨骼（手/头等），已挂静骨 — 补全手臂关节可消除';
+    } else if (stats?.method === 'voxelBind') {
+      runtimeLabel.textContent = '预览已就绪 · 体素 ' + voxelRes + ' · 点选关节旋转对比折角区';
+    } else {
+      runtimeLabel.textContent = '预览已就绪（包络回退）· '
+        + (stats?.warning || '点选关节旋转测试');
+    }
+    const firstPoseBone = session.bones.find((b) => !b.userData?.staticUncovered) || null;
+    selectPreviewBone(firstPoseBone);
+  } catch (error) {
+    disposePreviewSession();
+    graph.root.visible = true;
+    if (characterMeshRoot) characterMeshRoot.visible = meshVisibleToggle.checked;
+    labMode = 'edit';
+    syncPreviewUi();
+    runtimeLabel.textContent = '进入预览失败：' + (error?.message || error);
+  }
+}
+
+function exitPreviewMode() {
+  if (!isPreviewMode()) return;
+  disposePreviewSession();
+  graph.root.visible = true;
+  if (characterMeshRoot) characterMeshRoot.visible = meshVisibleToggle.checked;
+  labMode = 'edit';
+  syncPreviewUi();
+  refreshCharacterMeshAppearance();
+  syncGizmo();
+  syncReadout();
+  runtimeLabel.textContent = '已退出预览 · 编辑工程未改动';
+}
+
+async function exportPreviewGlb() {
+  if (!previewSession) {
+    runtimeLabel.textContent = '请先进入预览再导出';
+    return;
+  }
+  runtimeLabel.textContent = '正在导出 GLB…';
+  try {
+    // Hide pick helpers so they are not exported.
+    for (const pick of getPreviewPickables()) pick.visible = false;
+    if (previewHelper) previewHelper.visible = false;
+    const buffer = await exportBoundPreviewGlb(previewSession.container);
+    for (const pick of getPreviewPickables()) pick.visible = true;
+    if (previewHelper) previewHelper.visible = true;
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    downloadArrayBuffer('human-rig-' + stamp + '.glb', buffer);
+    runtimeLabel.textContent = '已导出 GLB（含骨骼 + 蒙皮权重）';
+  } catch (error) {
+    for (const pick of getPreviewPickables()) pick.visible = true;
+    if (previewHelper) previewHelper.visible = true;
+    runtimeLabel.textContent = '导出失败：' + (error?.message || error);
+  }
 }
 
 async function importCharacterMeshFile(file) {
@@ -382,6 +786,10 @@ async function importCharacterMeshFile(file) {
 }
 
 async function saveSceneToFile() {
+  if (isPreviewMode()) {
+    runtimeLabel.textContent = '预览模式请先退出再保存编辑工程';
+    return;
+  }
   runtimeLabel.textContent = '正在保存场景…';
   try {
     // Capture graph first so Z-ball state matches what the user sees now.
@@ -440,6 +848,10 @@ async function saveSceneToFile() {
 
 async function loadSceneFromFile(file) {
   if (!file) return;
+  if (isPreviewMode()) {
+    runtimeLabel.textContent = '预览模式请先退出再打开场景';
+    return;
+  }
   runtimeLabel.textContent = '正在打开场景…';
   try {
     const text = await file.text();
@@ -457,19 +869,31 @@ async function loadSceneFromFile(file) {
       xrayToggle.checked = Boolean(doc.settings.xray);
       graph.setXRay(xrayToggle.checked);
       centerCreateToggle.checked = Boolean(doc.settings.centerCreate);
-      if (typeof doc.settings.meshOpacity === 'number') {
-        meshOpacityInput.value = String(doc.settings.meshOpacity);
-      }
       if (typeof doc.settings.meshFitTargetHeight === 'number') {
         meshFitHeightInput.value = String(clampFitHeight(doc.settings.meshFitTargetHeight));
       }
       meshVisibleToggle.checked = doc.settings.meshVisible !== false;
-      zAlwaysVisibleToggle.checked = doc.settings.zAlwaysVisible !== false;
+      zAlwaysVisibleToggle.checked = Boolean(doc.settings.zAlwaysVisible);
+      if (typeof doc.settings.meshOpacity === 'number') {
+        meshOpacityInput.value = String(doc.settings.meshOpacity);
+        meshOpacityOutput.textContent = Math.round(doc.settings.meshOpacity * 100) + '%';
+      } else {
+        meshOpacityInput.value = '1';
+        meshOpacityOutput.textContent = '100%';
+      }
     }
 
     if (doc.mesh) {
       const loaded = await deserializeMeshPayload(doc.mesh);
       setCharacterMesh(loaded.root, loaded.meshes, loaded.fileName);
+      // Keep scene-file opacity / occlusion settings (setCharacterMesh resets to opaque).
+      if (doc.settings) {
+        if (typeof doc.settings.meshOpacity === 'number') {
+          meshOpacityInput.value = String(doc.settings.meshOpacity);
+          meshOpacityOutput.textContent = Math.round(doc.settings.meshOpacity * 100) + '%';
+        }
+        zAlwaysVisibleToggle.checked = Boolean(doc.settings.zAlwaysVisible);
+      }
       characterMeshRoot.visible = meshVisibleToggle.checked;
       refreshCharacterMeshAppearance();
     }
@@ -542,6 +966,10 @@ function setTool(next) {
 }
 
 function syncGizmo() {
+  if (isPreviewMode()) {
+    syncPreviewBoneGizmo();
+    return;
+  }
   const selected = graph.getSelected();
   if (tool === 'move' && selected?.role === 'joint') {
     transform.setMode('translate');
@@ -734,6 +1162,18 @@ function commitDrawGesture(event) {
 function onPointerDown(event) {
   if (event.button !== 0 || transform.axis) return;
 
+  if (isPreviewMode()) {
+    setPointerFromEvent(event, canvas, pointer);
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObjects(getPreviewPickables(), false);
+    if (hits.length > 0) {
+      const bone = hits[0].object.userData.previewBone;
+      selectPreviewBone(bone);
+      runtimeLabel.textContent = '已选骨骼：' + bone.name;
+    }
+    return;
+  }
+
   if (tool === 'draw') {
     beginDraw(event);
     return;
@@ -884,6 +1324,8 @@ centerCreateToggle.addEventListener('change', () => {
 
 xrayToggle.addEventListener('change', () => {
   graph.setXRay(xrayToggle.checked);
+  // X-ray restyles spheres; re-assert draw order for Z-always-visible.
+  refreshCharacterMeshAppearance();
 });
 
 document.querySelector('#create-root').addEventListener('click', () => {
@@ -952,10 +1394,7 @@ meshOpacityInput.addEventListener('input', () => {
   syncMeshUi();
 });
 zAlwaysVisibleToggle.addEventListener('change', () => {
-  refreshCharacterMeshAppearance();
-  runtimeLabel.textContent = zAlwaysVisibleToggle.checked
-    ? 'Z 球总可见：Mesh 不遮挡 Z 球（球与球仍互挡）'
-    : '正常遮挡：Mesh 按深度挡住 Z 球';
+  setZAlwaysVisible(zAlwaysVisibleToggle.checked);
 });
 meshScaleInput.addEventListener('input', () => {
   applyCharacterMeshScale(meshScaleInput.value, { announce: true });
@@ -985,6 +1424,11 @@ sceneFileInput.addEventListener('change', async () => {
   if (file) await loadSceneFromFile(file);
 });
 
+enterPreviewBtn?.addEventListener('click', () => enterPreviewMode());
+exitPreviewBtn?.addEventListener('click', () => exitPreviewMode());
+resetPreviewPoseBtn?.addEventListener('click', () => resetPreviewPose());
+exportGlbBtn?.addEventListener('click', () => { void exportPreviewGlb(); });
+
 canvas.addEventListener('pointerdown', onPointerDown);
 canvas.addEventListener('pointermove', onPointerMove);
 window.addEventListener('pointerup', onPointerUp);
@@ -998,6 +1442,36 @@ window.addEventListener('keydown', (event) => {
 
   const key = event.key.toLowerCase();
   const mod = event.ctrlKey || event.metaKey;
+
+  if (isPreviewMode()) {
+    if (key === 'escape') {
+      event.preventDefault();
+      exitPreviewMode();
+      return;
+    }
+    if (mod && !event.altKey && key === 'z') {
+      event.preventDefault();
+      if (event.shiftKey) redoPreviewPose();
+      else undoPreviewPose();
+      return;
+    }
+    if (mod && !event.altKey && key === 'y') {
+      event.preventDefault();
+      redoPreviewPose();
+      return;
+    }
+    if (key === 'home') {
+      event.preventDefault();
+      resetPreviewPose();
+      return;
+    }
+    if (mod && !event.altKey && key === 's') {
+      event.preventDefault();
+      void exportPreviewGlb();
+      return;
+    }
+    return;
+  }
 
   if (mod && !event.altKey && key === 'z') {
     event.preventDefault();
@@ -1051,15 +1525,11 @@ window.addEventListener('keydown', (event) => {
     graph.setXRay(xrayToggle.checked);
   } else if (key === 'v') {
     event.preventDefault();
-    if (!characterMeshRoot) {
-      runtimeLabel.textContent = '请先导入人物 Mesh，再切换 Z 球总可见';
+    if (isPreviewMode()) {
+      runtimeLabel.textContent = '预览模式请先退出，再切换 Z 球总可见';
       return;
     }
-    zAlwaysVisibleToggle.checked = !zAlwaysVisibleToggle.checked;
-    refreshCharacterMeshAppearance();
-    runtimeLabel.textContent = zAlwaysVisibleToggle.checked
-      ? 'Z 球总可见：Mesh 不遮挡 Z 球（球与球仍互挡）'
-      : '正常遮挡：Mesh 按深度挡住 Z 球';
+    setZAlwaysVisible(!zAlwaysVisibleToggle.checked);
   } else if (key === 'delete' || key === 'backspace') {
     event.preventDefault();
     resetPromoteQArm();
@@ -1073,7 +1543,11 @@ window.addEventListener('keydown', (event) => {
 });
 
 function frame() {
-  graph.update();
+  if (!isPreviewMode()) graph.update();
+  if (previewSession) {
+    previewSession.armature.updateMatrixWorld(true);
+    previewSession.skeleton.update();
+  }
   controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
@@ -1082,6 +1556,7 @@ function frame() {
 setTool('draw');
 syncReadout();
 syncMeshUi();
-runtimeLabel.textContent = '可导入人物 Mesh；编 Z 球后 Ctrl+S 保存场景';
-toolDescription.textContent = '导入 Mesh 对齐编骨。Q：先点选再延伸；场景保存为 .zscene.json（Z 球 + Mesh）。';
+syncPreviewUi();
+runtimeLabel.textContent = '可导入人物 Mesh；编 Z 球后进入预览蒙皮，或 Ctrl+S 保存场景';
+toolDescription.textContent = '导入 Mesh 对齐编骨。Q：先点选再延伸；预览：关节→骨骼+包络蒙皮；导出 GLB。';
 frame();

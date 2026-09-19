@@ -1,12 +1,12 @@
-{
+﻿{
   "name": "zsphere-lab",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "HUMAN RIG LAB · ZSphere foundation: freeform joint graph, mesh import, scene save.",
+  "description": "HUMAN RIG LAB — ZSphere edit + mesh import + geodesic voxel skin preview (pre Rigid Segment).",
   "scripts": {
     "demo": "node ./demo/server.mjs",
-    "test": "node --test test/zsphere-graph.test.js test/zsphere-history.test.js test/zsphere-scene-io.test.js"
+    "test": "node --test test/zsphere-graph.test.js test/zsphere-history.test.js test/zsphere-scene-io.test.js test/zsphere-bind.test.js test/zsphere-voxel-bind.test.js"
   },
   "dependencies": {
     "three": "^0.185.0"

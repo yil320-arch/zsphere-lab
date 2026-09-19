@@ -20,14 +20,13 @@ export function createSceneDocument({ graphState, settings = {}, mesh = null }) 
       symmetry: settings.symmetry !== false,
       xray: Boolean(settings.xray),
       centerCreate: Boolean(settings.centerCreate),
-      meshOpacity: typeof settings.meshOpacity === 'number' ? settings.meshOpacity : 0.45,
+      meshOpacity: typeof settings.meshOpacity === 'number' ? settings.meshOpacity : 1,
       meshVisible: settings.meshVisible !== false,
       meshFitTargetHeight: typeof settings.meshFitTargetHeight === 'number'
         ? settings.meshFitTargetHeight
         : 1.7,
-      /** When true, character mesh does not occlude Z-spheres (edit convenience). */
-      zAlwaysVisible: settings.zAlwaysVisible !== false
-    },
+      /** When true, character mesh does not occlude Z-spheres (optional edit aid). */
+      zAlwaysVisible: Boolean(settings.zAlwaysVisible)    },
     graph: graphState ?? { version: 1, nextId: 1, selectedId: null, joints: [] },
     mesh
   };
@@ -89,10 +88,12 @@ export function prepareImportedMeshes(root) {
  * @param {import('three').Mesh[]} meshes
  * @param {number} opacity
  * @param {{ zAlwaysVisible?: boolean }} [options]
- *   zAlwaysVisible: Mesh does not write depth, so Z-spheres stay visible through it.
+ *   zAlwaysVisible: Mesh does not write depth, so Z-spheres can stay visible through it.
  *   Z-sphere↔Z-sphere occlusion is unchanged (their own depthTest stays on).
+ *   Caller should raise Z-sphere renderOrder above the mesh when this is on —
+ *   otherwise transparent mesh paints over spheres after the opaque pass.
  */
-export function applyMeshOpacity(meshes, opacity, { zAlwaysVisible = true } = {}) {
+export function applyMeshOpacity(meshes, opacity, { zAlwaysVisible = false } = {}) {
   const o = Math.min(1, Math.max(0.05, Number(opacity) || 1));
   for (const mesh of meshes) {
     mesh.renderOrder = 0;
@@ -101,7 +102,7 @@ export function applyMeshOpacity(meshes, opacity, { zAlwaysVisible = true } = {}
       if (!material) continue;
       material.transparent = o < 0.999;
       material.opacity = o;
-      // Always-visible: mesh must not occlude Z-spheres.
+      // Always-visible: mesh must not occlude Z-spheres via the depth buffer.
       // Normal occlusion: mesh writes depth even when translucent.
       material.depthWrite = zAlwaysVisible ? false : true;
       material.depthTest = true;

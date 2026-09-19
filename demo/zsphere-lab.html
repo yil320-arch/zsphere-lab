@@ -28,6 +28,10 @@
           <span class="state-dot"></span>
           <span id="runtime-label">Z 球地基 · 从零创建</span>
         </div>
+        <div class="runtime-state is-hidden" id="preview-mode-badge" data-state="preview">
+          <span class="state-dot"></span>
+          <span>预览模式</span>
+        </div>
       </header>
 
       <div class="workspace">
@@ -73,14 +77,14 @@
             <label class="fit-range-control">
               <span>
                 <strong>Mesh 透明度</strong>
-                <small>半透明方便对齐 Z 球</small>
+                <small>默认不透明；可调低方便对 Z 球</small>
               </span>
-              <output id="mesh-opacity-output">45%</output>
-              <input id="mesh-opacity" type="range" min="0.1" max="1" step="0.05" value="0.45" disabled />
+              <output id="mesh-opacity-output">100%</output>
+              <input id="mesh-opacity" type="range" min="0.1" max="1" step="0.05" value="1" disabled />
             </label>
             <label class="setting-toggle">
-              <span><strong>Z 球总可见</strong><small>开：Mesh 不挡 Z 球 · V（球与球仍互挡）</small></span>
-              <input id="z-always-visible-toggle" type="checkbox" checked disabled />
+              <span><strong>Z 球总可见</strong><small>开：Mesh 不挡 Z 球 · V（可选）</small></span>
+              <input id="z-always-visible-toggle" type="checkbox" disabled />
               <span class="toggle-track" aria-hidden="true"></span>
             </label>
             <div class="pose-action-row">
@@ -100,7 +104,54 @@
             <p class="group-note">保存为 <code>.zscene.json</code>：含 Z 球图 + 已导入 Mesh（嵌入 glTF）。Ctrl+S 保存。</p>
           </section>
 
-          <section class="control-section pose-settings">
+          <section class="control-section pose-settings" id="preview-entry-section">
+            <div class="section-title">
+              <h2>骨骼预览</h2>
+            </div>
+            <label class="fit-range-control">
+              <span>
+                <strong>体素分辨率</strong>
+                <small>实验 A：越高越不易糊窄腔，越慢</small>
+              </span>
+              <select id="voxel-resolution">
+                <option value="48">48（快）</option>
+                <option value="64" selected>64（默认）</option>
+                <option value="96">96</option>
+                <option value="128">128（慢）</option>
+              </select>
+            </label>
+            <label class="setting-toggle">
+              <span><strong>体积可见性</strong><small>Bone Glow：挡住隔空假近邻（默认开）</small></span>
+              <input id="visibility-gate-toggle" type="checkbox" checked />
+              <span class="toggle-track" aria-hidden="true"></span>
+            </label>
+            <div class="pose-action-row">
+              <button type="button" id="enter-preview" class="wide-action">进入预览</button>
+            </div>
+            <p class="group-note">快照当前关节 → 自动蒙皮（独立缓存）。改分辨率/可见性需退出后重进。Link 不参与。</p>
+          </section>
+
+          <section class="control-section pose-settings is-hidden" id="preview-controls-section">
+            <div class="section-title">
+              <h2>预览模式</h2>
+              <span id="preview-status">摆姿测试</span>
+            </div>
+            <p class="group-note" id="preview-hint">点选关节旋转测蒙皮。<kbd>Ctrl+Z</kbd> 撤销姿态 · <kbd>Ctrl+Y</kbd> 重做 · <kbd>Home</kbd> /「复位姿态」回绑定姿态。退出丢弃预览，不改编辑工程。</p>
+            <div class="pose-action-row">
+              <button type="button" id="reset-preview-pose">复位姿态</button>
+              <button type="button" id="export-glb">导出 GLB</button>
+            </div>
+            <div class="pose-action-row">
+              <button type="button" id="exit-preview" class="wide-action">退出预览</button>
+            </div>
+            <div class="selected-bone-readout">
+              <span>Preview bone</span>
+              <strong id="preview-bone-readout">—</strong>
+              <small id="preview-weight-readout">权重统计</small>
+            </div>
+          </section>
+
+          <section class="control-section pose-settings" id="edit-tools-section">
             <div class="section-title">
               <h2>工具模式</h2>
               <span id="tool-status">Q · 创建</span>
@@ -154,6 +205,9 @@
           </div>
           <div class="interaction-hint" id="interaction-hint">
             <kbd>Q</kbd> 延伸 · <kbd>W</kbd> 移动 · <kbd>E</kbd> 缩放 · <kbd>R</kbd> 旋转 · <kbd>V</kbd> Z球总可见 · <kbd>Ctrl+S</kbd> 保存
+          </div>
+          <div class="interaction-hint is-hidden" id="preview-interaction-hint">
+            点选骨骼 · 拖旋转 · <kbd>Ctrl+Z</kbd> 撤销 · <kbd>Home</kbd> 复位 · <kbd>Esc</kbd> 退出
           </div>
         </main>
 

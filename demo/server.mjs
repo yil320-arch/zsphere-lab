@@ -6,14 +6,18 @@ import { fileURLToPath } from 'node:url';
 
 const demoDirectory = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(demoDirectory, '..');
+const mpfbDataRoot = resolve(projectRoot, '..', 'mpfb2', 'src', 'mpfb', 'data');
+const mpfbTestDataRoot = resolve(projectRoot, '..', 'mpfb2', 'test', 'testdata');
 const port = Number.parseInt(process.env.DEMO_PORT ?? '4173', 10);
 
 const mimeTypes = {
   '.css': 'text/css; charset=utf-8',
+  '.gz': 'application/octet-stream',
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8'
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.obj': 'text/plain; charset=utf-8'
 };
 
 function safeResolve(root, requestPath) {
@@ -25,9 +29,18 @@ function safeResolve(root, requestPath) {
 const server = createServer(async (request, response) => {
   try {
     const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
-    const filePath = pathname === '/' || pathname === ''
-      ? resolve(demoDirectory, 'zsphere-lab.html')
-      : safeResolve(projectRoot, pathname);
+    let filePath;
+    if (pathname === '/') {
+      filePath = resolve(demoDirectory, 'zsphere-lab.html');
+    } else if (pathname === '/legacy' || pathname === '/legacy/') {
+      filePath = resolve(demoDirectory, 'index.html');
+    } else if (pathname.startsWith('/mpfb-data/')) {
+      filePath = safeResolve(mpfbDataRoot, pathname.slice('/mpfb-data'.length));
+    } else if (pathname.startsWith('/mpfb-testdata/')) {
+      filePath = safeResolve(mpfbTestDataRoot, pathname.slice('/mpfb-testdata'.length));
+    } else {
+      filePath = safeResolve(projectRoot, pathname);
+    }
 
     if (!filePath) {
       response.writeHead(403).end('Forbidden');
@@ -50,4 +63,5 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, '127.0.0.1', () => {
   console.log(`ZSphere lab: http://127.0.0.1:${port}/`);
+  console.log(`Legacy fitting room: http://127.0.0.1:${port}/legacy`);
 });
